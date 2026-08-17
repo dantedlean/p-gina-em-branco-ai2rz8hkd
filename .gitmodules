@@ -1,0 +1,4 @@
+[submodule "adapta-cliente"]
+	path = adapta-cliente
+	url = https://github.com/fnavaar/dantedlean-adapta-cliente.git
+	branch = main
