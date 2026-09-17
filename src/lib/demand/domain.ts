@@ -5,13 +5,25 @@ export const DEMO_ACTOR = {
   label: 'PCP — fixture controlada',
 } as const
 
-export type DemandState = 'aguardando_engenharia'
+export const ORDER_STATUS_VALUES = ['ativo', 'cancelado'] as const
+export const ELIGIBILITY_STATUS_VALUES = ['elegivel', 'pendente_dados', 'inelegivel'] as const
+
+export type OrderStatus = (typeof ORDER_STATUS_VALUES)[number]
+export type EligibilityStatus = (typeof ELIGIBILITY_STATUS_VALUES)[number]
+export type DemandState =
+  | 'aguardando_engenharia'
+  | 'pendente_dados'
+  | 'cancelada'
+  | 'inelegivel'
 export type DemandSourceType = 'fixture'
 export type DemandEventType =
   | 'demand_received'
   | 'eligibility_confirmed'
   | 'context_created'
   | 'ingestion_replayed'
+  | 'demand_pended'
+  | 'demand_cancelled'
+  | 'eligibility_rejected'
 
 export interface DemandProduct {
   code: string
@@ -27,6 +39,8 @@ export interface DemandInput {
   products: DemandProduct[]
   delivery_location: string
   item_count: number
+  order_status: OrderStatus
+  eligibility_status: EligibilityStatus
   source_type: DemandSourceType
   received_at: string
 }
@@ -44,6 +58,7 @@ export interface DemandContext extends DemandInput {
   id: string
   state: DemandState
   state_reason: string
+  state_responsible: string
   created_at: string
   updated_at: string
   events: DemandEvent[]
@@ -65,7 +80,7 @@ export class DemandValidationError extends Error {
   readonly issues: string[]
 
   constructor(issues: string[]) {
-    super('A demanda não atende aos campos mínimos.')
+    super('A demanda não atende aos campos mínimos ou ao contrato da fixture.')
     this.name = 'DemandValidationError'
     this.issues = issues
   }
@@ -88,6 +103,10 @@ function makeId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`
 }
 
+function text(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
 function isValidDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return false
@@ -97,18 +116,57 @@ function isValidDate(value: string): boolean {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
 }
 
+function isOrderStatus(value: unknown): value is OrderStatus {
+  return ORDER_STATUS_VALUES.includes(value as OrderStatus)
+}
+
+function isEligibilityStatus(value: unknown): value is EligibilityStatus {
+  return ELIGIBILITY_STATUS_VALUES.includes(value as EligibilityStatus)
+}
+
+function isDemandState(value: unknown): value is DemandState {
+  return (
+    value === 'aguardando_engenharia' ||
+    value === 'pendente_dados' ||
+    value === 'cancelada' ||
+    value === 'inelegivel'
+  )
+}
+
 export function validateDemandInput(input: DemandInput): string[] {
   const issues: string[] = []
 
-  if (!input.source_event_id.trim()) {
-    issues.push('Informe o identificador da tentativa de entrada.')
+  if (!text(input.source_event_id) && !text(input.order_external_id)) {
+    issues.push('Informe o identificador da entrada ou o número do pedido para permitir reprocessamento seguro.')
   }
 
-  if (!input.order_external_id.trim()) {
+  if (input.source_type !== 'fixture') {
+    issues.push('A entrada desta demonstração deve usar source_type=fixture.')
+  }
+
+  if (!text(input.received_at)) {
+    issues.push('A data de recebimento é obrigatória para o histórico.')
+  }
+
+  if (!isOrderStatus(input.order_status)) {
+    issues.push('Informe um status do pedido válido.')
+  }
+
+  if (!isEligibilityStatus(input.eligibility_status)) {
+    issues.push('Informe um status de elegibilidade válido.')
+  }
+
+  return issues
+}
+
+export function validateDemandBusinessData(input: DemandInput): string[] {
+  const issues: string[] = []
+
+  if (!text(input.order_external_id)) {
     issues.push('Informe o número do pedido.')
   }
 
-  if (!input.customer.trim()) {
+  if (!text(input.customer)) {
     issues.push('Informe o cliente.')
   }
 
@@ -116,7 +174,7 @@ export function validateDemandInput(input: DemandInput): string[] {
     issues.push('Informe uma data prometida válida.')
   }
 
-  if (!input.delivery_location.trim()) {
+  if (!text(input.delivery_location)) {
     issues.push('Informe o local de entrega.')
   }
 
@@ -124,19 +182,11 @@ export function validateDemandInput(input: DemandInput): string[] {
     issues.push('A quantidade de itens deve ser um número inteiro maior que zero.')
   }
 
-  if (input.source_type !== 'fixture') {
-    issues.push('A entrada desta demonstração deve usar source_type=fixture.')
-  }
-
-  if (!input.received_at.trim()) {
-    issues.push('A data de recebimento é obrigatória para o histórico.')
-  }
-
   if (!Array.isArray(input.products) || input.products.length === 0) {
     issues.push('Inclua pelo menos um produto.')
   } else {
     input.products.forEach((product, index) => {
-      if (!product.description.trim()) {
+      if (!text(product.description)) {
         issues.push(`Informe a descrição do produto ${index + 1}.`)
       }
 
@@ -158,6 +208,8 @@ function comparableDemand(input: DemandInput | DemandContext) {
     products: input.products,
     delivery_location: input.delivery_location,
     item_count: input.item_count,
+    order_status: input.order_status,
+    eligibility_status: input.eligibility_status,
     source_type: input.source_type,
   }
 }
@@ -182,22 +234,65 @@ function createEvent(
   }
 }
 
+interface StateDecision {
+  state: DemandState
+  reason: string
+  eventType: Exclude<DemandEventType, 'demand_received' | 'ingestion_replayed'>
+}
+
+function decideState(input: DemandInput, dataIssues: string[]): StateDecision {
+  if (input.order_status === 'cancelado') {
+    return {
+      state: 'cancelada',
+      reason: 'Pedido cancelado na origem; a demanda não foi encaminhada para Engenharia.',
+      eventType: 'demand_cancelled',
+    }
+  }
+
+  if (input.eligibility_status === 'inelegivel') {
+    return {
+      state: 'inelegivel',
+      reason: 'Elegibilidade recusada; a demanda não foi encaminhada para Engenharia.',
+      eventType: 'eligibility_rejected',
+    }
+  }
+
+  if (input.eligibility_status === 'pendente_dados' || dataIssues.length > 0) {
+    const reason =
+      dataIssues.length > 0
+        ? `Dados mínimos ausentes ou inválidos: ${dataIssues.join(' ')}`
+        : 'Elegibilidade pendente de dados mínimos para continuar.'
+
+    return {
+      state: 'pendente_dados',
+      reason,
+      eventType: 'demand_pended',
+    }
+  }
+
+  return {
+    state: 'aguardando_engenharia',
+    reason: 'Dados mínimos válidos; contexto encaminhado automaticamente para Engenharia.',
+    eventType: 'context_created',
+  }
+}
+
 export function createOrReuseDemandContext(
   contexts: DemandContext[],
   input: DemandInput,
   actor: DemandActor,
   now = new Date(),
 ): IngestDemandResult {
-  const issues = validateDemandInput(input)
-  if (issues.length > 0) {
-    throw new DemandValidationError(issues)
+  const contractIssues = validateDemandInput(input)
+  if (contractIssues.length > 0) {
+    throw new DemandValidationError(contractIssues)
   }
 
   const occurredAt = now.toISOString()
   const existing = contexts.find(
     (context) =>
-      context.source_event_id === input.source_event_id ||
-      context.order_external_id === input.order_external_id,
+      (text(input.source_event_id) && context.source_event_id === input.source_event_id) ||
+      (text(input.order_external_id) && context.order_external_id === input.order_external_id),
   )
 
   if (existing) {
@@ -225,6 +320,8 @@ export function createOrReuseDemandContext(
     }
   }
 
+  const dataIssues = validateDemandBusinessData(input)
+  const decision = decideState(input, dataIssues)
   const contextId = makeId('ctx')
   const receivedEvent = createEvent(
     'demand_received',
@@ -232,26 +329,34 @@ export function createOrReuseDemandContext(
     occurredAt,
     'Entrada recebida pela fixture controlada.',
   )
-  const eligibilityEvent = createEvent(
-    'eligibility_confirmed',
+  const contextEvent = createEvent(
+    decision.eventType,
     actor,
     occurredAt,
-    'Campos mínimos válidos; elegibilidade automática confirmada.',
+    decision.reason,
   )
-  const contextCreatedEvent = createEvent(
-    'context_created',
-    actor,
-    occurredAt,
-    'Contexto criado e encaminhado para a fila de Engenharia.',
-  )
+  const events =
+    decision.state === 'aguardando_engenharia'
+      ? [
+          receivedEvent,
+          createEvent(
+            'eligibility_confirmed',
+            actor,
+            occurredAt,
+            'Campos mínimos válidos; elegibilidade automática confirmada.',
+          ),
+          contextEvent,
+        ]
+      : [receivedEvent, contextEvent]
   const context: DemandContext = {
     ...input,
     id: contextId,
-    state: 'aguardando_engenharia',
-    state_reason: 'Dados mínimos válidos; contexto encaminhado automaticamente para Engenharia.',
+    state: decision.state,
+    state_reason: decision.reason,
+    state_responsible: actor.label,
     created_at: occurredAt,
     updated_at: occurredAt,
-    events: [receivedEvent, eligibilityEvent, contextCreatedEvent],
+    events,
   }
 
   return {
@@ -270,20 +375,50 @@ function getDemandStorage(): Storage {
   return window.localStorage
 }
 
-function isStoredContext(value: unknown): value is DemandContext {
+function normalizeStoredContext(value: unknown): DemandContext | null {
   if (!value || typeof value !== 'object') {
-    return false
+    return null
   }
 
   const candidate = value as Partial<DemandContext>
-  return (
-    typeof candidate.id === 'string' &&
-    typeof candidate.source_event_id === 'string' &&
-    typeof candidate.order_external_id === 'string' &&
-    typeof candidate.state === 'string' &&
-    Array.isArray(candidate.products) &&
-    Array.isArray(candidate.events)
-  )
+  if (
+    typeof candidate.id !== 'string' ||
+    typeof candidate.source_event_id !== 'string' ||
+    typeof candidate.order_external_id !== 'string' ||
+    !isDemandState(candidate.state) ||
+    !Array.isArray(candidate.products) ||
+    !Array.isArray(candidate.events)
+  ) {
+    return null
+  }
+
+  const legacyState = candidate.state
+  const orderStatus = isOrderStatus(candidate.order_status)
+    ? candidate.order_status
+    : legacyState === 'cancelada'
+      ? 'cancelado'
+      : 'ativo'
+  const eligibilityStatus = isEligibilityStatus(candidate.eligibility_status)
+    ? candidate.eligibility_status
+    : legacyState === 'inelegivel'
+      ? 'inelegivel'
+      : legacyState === 'pendente_dados'
+        ? 'pendente_dados'
+        : 'elegivel'
+
+  return {
+    ...candidate,
+    order_status: orderStatus,
+    eligibility_status: eligibilityStatus,
+    state_reason:
+      typeof candidate.state_reason === 'string'
+        ? candidate.state_reason
+        : 'Contexto migrado da versão anterior da demonstração.',
+    state_responsible:
+      typeof candidate.state_responsible === 'string'
+        ? candidate.state_responsible
+        : 'Sistema — migração da demonstração',
+  } as DemandContext
 }
 
 export function readDemandContexts(storage: Storage = getDemandStorage()): DemandContext[] {
@@ -301,11 +436,16 @@ export function readDemandContexts(storage: Storage = getDemandStorage()): Deman
     )
   }
 
-  if (!Array.isArray(parsed) || parsed.some((item) => !isStoredContext(item))) {
+  if (!Array.isArray(parsed)) {
     throw new Error('Os dados salvos da demonstração estão em formato inválido; nada foi sobrescrito.')
   }
 
-  return parsed
+  const contexts = parsed.map(normalizeStoredContext)
+  if (contexts.some((context) => context === null)) {
+    throw new Error('Os dados salvos da demonstração estão em formato inválido; nada foi sobrescrito.')
+  }
+
+  return contexts as DemandContext[]
 }
 
 export function writeDemandContexts(

@@ -24,12 +24,18 @@ import {
   DEMO_ACTOR,
   type DemandContext,
   type DemandInput,
+  type DemandState,
   DemandConflictError,
   DemandValidationError,
   ingestStoredDemand,
   readDemandContexts,
 } from '@/lib/demand/domain'
-import { DEMO_DEMAND_FIXTURE } from '@/lib/demand/fixtures'
+import {
+  DEMAND_SCENARIO_LABELS,
+  DEMO_DEMAND_FIXTURE,
+  DEMO_DEMAND_FIXTURES,
+  type DemandScenario,
+} from '@/lib/demand/fixtures'
 
 const dateFormatter = new Intl.DateTimeFormat('pt-BR', {
   dateStyle: 'short',
@@ -40,6 +46,18 @@ const dateTimeFormatter = new Intl.DateTimeFormat('pt-BR', {
   timeStyle: 'short',
   timeZone: 'UTC',
 })
+const stateLabels: Record<DemandState, string> = {
+  aguardando_engenharia: 'aguardando_engenharia',
+  pendente_dados: 'pendente_dados',
+  cancelada: 'cancelada',
+  inelegivel: 'inelegivel',
+}
+const stateClasses: Record<DemandState, string> = {
+  aguardando_engenharia: 'border-emerald-300 text-emerald-700',
+  pendente_dados: 'border-amber-300 text-amber-700',
+  cancelada: 'border-slate-300 text-slate-700',
+  inelegivel: 'border-red-300 text-red-700',
+}
 
 function nowIso(): string {
   return new Date().toISOString()
@@ -59,10 +77,11 @@ function sortContexts(contexts: DemandContext[]): DemandContext[] {
   return [...contexts].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
 }
 
-function buildFixture(): DemandInput {
+function cloneFixture(scenario: DemandScenario): DemandInput {
+  const fixture = DEMO_DEMAND_FIXTURES[scenario]
   return {
-    ...DEMO_DEMAND_FIXTURE,
-    products: DEMO_DEMAND_FIXTURE.products.map((product) => ({ ...product })),
+    ...fixture,
+    products: fixture.products.map((product) => ({ ...product })),
     received_at: nowIso(),
   }
 }
@@ -89,6 +108,7 @@ function getInitialDemandState(): InitialDemandState {
 export default function Index() {
   const [initialDemandState] = useState(getInitialDemandState)
   const [contexts, setContexts] = useState<DemandContext[]>(initialDemandState.contexts)
+  const [scenario, setScenario] = useState<DemandScenario>('valida')
   const [sourceEventId, setSourceEventId] = useState(DEMO_DEMAND_FIXTURE.source_event_id)
   const [orderExternalId, setOrderExternalId] = useState(DEMO_DEMAND_FIXTURE.order_external_id)
   const [customer, setCustomer] = useState(DEMO_DEMAND_FIXTURE.customer)
@@ -112,8 +132,9 @@ export default function Index() {
     [contexts, selectedContextId],
   )
 
-  function resetForm() {
-    const fixture = buildFixture()
+  function loadScenario(nextScenario: DemandScenario) {
+    const fixture = cloneFixture(nextScenario)
+    setScenario(nextScenario)
     setSourceEventId(fixture.source_event_id)
     setOrderExternalId(fixture.order_external_id)
     setCustomer(fixture.customer)
@@ -122,6 +143,7 @@ export default function Index() {
     setItemCount(String(fixture.item_count))
     setProductDescription(fixture.products[0]?.description ?? '')
     setProductQuantity(String(fixture.products[0]?.quantity ?? 1))
+    setMessage(null)
   }
 
   function submitDemand(event: FormEvent<HTMLFormElement>) {
@@ -129,21 +151,22 @@ export default function Index() {
     setMessage(null)
     setIsSubmitting(true)
 
+    const fixture = DEMO_DEMAND_FIXTURES[scenario]
     const input: DemandInput = {
+      ...fixture,
       source_event_id: sourceEventId,
       order_external_id: orderExternalId,
       customer,
       promised_date: promisedDate,
+      delivery_location: deliveryLocation,
+      item_count: Number(itemCount),
       products: [
         {
-          code: DEMO_DEMAND_FIXTURE.products[0]?.code ?? 'PROD-DEMO-001',
+          code: fixture.products[0]?.code ?? 'PROD-DEMO-001',
           description: productDescription,
           quantity: Number(productQuantity),
         },
       ],
-      delivery_location: deliveryLocation,
-      item_count: Number(itemCount),
-      source_type: 'fixture',
       received_at: nowIso(),
     }
 
@@ -153,9 +176,9 @@ export default function Index() {
       setContexts(nextContexts)
       setSelectedContextId(result.context.id)
       setMessage({
-        tone: 'success',
+        tone: result.context.state === 'aguardando_engenharia' ? 'success' : 'error',
         text: result.created
-          ? `Contexto ${result.context.id} criado e encaminhado para Engenharia.`
+          ? `Contexto ${result.context.id} registrado em ${stateLabels[result.context.state]}.`
           : `Reenvio idempotente: o contexto ${result.context.id} foi reutilizado; nenhum duplicado foi criado.`,
       })
     } catch (error) {
@@ -187,8 +210,8 @@ export default function Index() {
               Entrada de demanda
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-              Registre uma demanda de demonstração, valide os campos mínimos e acompanhe o contexto
-              encaminhado para Engenharia.
+              Registre uma demanda de demonstração, valide as bordas do fluxo e acompanhe o contexto
+              encaminhado ou bloqueado.
             </p>
           </div>
           <Badge variant="outline" className="w-fit gap-1.5 border-amber-300 bg-amber-50 px-3 py-1.5 text-amber-800">
@@ -196,6 +219,30 @@ export default function Index() {
             Fixture controlada · sem ERP
           </Badge>
         </header>
+
+        <Card className="border-slate-200 bg-white shadow-sm">
+          <CardHeader>
+            <CardTitle>Cenário da demonstração</CardTitle>
+            <CardDescription>
+              Os cenários abaixo exercitam status do pedido e status de elegibilidade separadamente.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {(Object.keys(DEMAND_SCENARIO_LABELS) as DemandScenario[]).map((item) => (
+                <Button
+                  key={item}
+                  type="button"
+                  variant={scenario === item ? 'default' : 'outline'}
+                  onClick={() => loadScenario(item)}
+                  className="justify-start"
+                >
+                  {DEMAND_SCENARIO_LABELS[item]}
+                </Button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
           <Card className="border-slate-200 bg-white shadow-sm">
@@ -211,106 +258,48 @@ export default function Index() {
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="source-event-id">Identificador da entrada</Label>
-                    <Input
-                      id="source-event-id"
-                      value={sourceEventId}
-                      onChange={(event) => setSourceEventId(event.target.value)}
-                      aria-describedby="source-event-help"
-                    />
-                    <p id="source-event-help" className="text-xs text-slate-500">
-                      Repetições deste valor são idempotentes.
-                    </p>
+                    <Input id="source-event-id" value={sourceEventId} onChange={(event) => setSourceEventId(event.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="order-external-id">Número do pedido</Label>
-                    <Input
-                      id="order-external-id"
-                      value={orderExternalId}
-                      onChange={(event) => setOrderExternalId(event.target.value)}
-                    />
+                    <Input id="order-external-id" value={orderExternalId} onChange={(event) => setOrderExternalId(event.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="customer">Cliente</Label>
-                    <Input
-                      id="customer"
-                      value={customer}
-                      onChange={(event) => setCustomer(event.target.value)}
-                    />
+                    <Input id="customer" value={customer} onChange={(event) => setCustomer(event.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="promised-date">Data prometida</Label>
-                    <Input
-                      id="promised-date"
-                      type="date"
-                      value={promisedDate}
-                      onChange={(event) => setPromisedDate(event.target.value)}
-                    />
+                    <Input id="promised-date" type="date" value={promisedDate} onChange={(event) => setPromisedDate(event.target.value)} />
                   </div>
                   <div className="space-y-2 sm:col-span-2">
                     <Label htmlFor="delivery-location">Local de entrega</Label>
-                    <Input
-                      id="delivery-location"
-                      value={deliveryLocation}
-                      onChange={(event) => setDeliveryLocation(event.target.value)}
-                    />
+                    <Input id="delivery-location" value={deliveryLocation} onChange={(event) => setDeliveryLocation(event.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="item-count">Quantidade de itens</Label>
-                    <Input
-                      id="item-count"
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={itemCount}
-                      onChange={(event) => setItemCount(event.target.value)}
-                    />
+                    <Input id="item-count" type="number" min={1} step={1} value={itemCount} onChange={(event) => setItemCount(event.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="product-quantity">Quantidade do produto</Label>
-                    <Input
-                      id="product-quantity"
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={productQuantity}
-                      onChange={(event) => setProductQuantity(event.target.value)}
-                    />
+                    <Input id="product-quantity" type="number" min={1} step={1} value={productQuantity} onChange={(event) => setProductQuantity(event.target.value)} />
                   </div>
                   <div className="space-y-2 sm:col-span-2">
                     <Label htmlFor="product-description">Produto</Label>
-                    <Input
-                      id="product-description"
-                      value={productDescription}
-                      onChange={(event) => setProductDescription(event.target.value)}
-                    />
+                    <Input id="product-description" value={productDescription} onChange={(event) => setProductDescription(event.target.value)} />
                   </div>
                 </div>
 
                 {message ? (
-                  <div
-                    className={`flex items-start gap-2 rounded-md border px-3 py-3 text-sm ${
-                      message.tone === 'success'
-                        ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
-                        : 'border-red-200 bg-red-50 text-red-900'
-                    }`}
-                    role="alert"
-                  >
-                    {message.tone === 'success' ? (
-                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                    ) : (
-                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                    )}
+                  <div className={`flex items-start gap-2 rounded-md border px-3 py-3 text-sm ${message.tone === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-red-200 bg-red-50 text-red-900'}`} role="alert">
+                    {message.tone === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> : <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />}
                     <span>{message.text}</span>
                   </div>
                 ) : null}
 
                 <div className="flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:justify-end">
-                  <Button type="button" variant="outline" onClick={resetForm}>
-                    Recarregar fixture
-                  </Button>
-                  <Button type="submit" disabled={isSubmitting}>
-                    {isSubmitting ? 'Registrando…' : 'Registrar demanda'}
-                  </Button>
+                  <Button type="button" variant="outline" onClick={() => loadScenario(scenario)}>Recarregar cenário</Button>
+                  <Button type="submit" disabled={isSubmitting}>{isSubmitting ? 'Registrando…' : 'Registrar demanda'}</Button>
                 </div>
               </form>
             </CardContent>
@@ -319,140 +308,45 @@ export default function Index() {
           <Card className="border-slate-200 bg-white shadow-sm">
             <CardHeader>
               <CardTitle>Contexto selecionado</CardTitle>
-              <CardDescription>
-                A demanda elegível segue automaticamente para a fila de Engenharia.
-              </CardDescription>
+              <CardDescription>Casos cancelados, inelegíveis ou incompletos não seguem para Engenharia.</CardDescription>
             </CardHeader>
             <CardContent>
               {selectedContext ? (
                 <div className="space-y-5">
-                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-mono text-xs text-emerald-800">{selectedContext.id}</span>
-                      <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
-                        aguardando_engenharia
-                      </Badge>
+                      <span className="font-mono text-xs text-slate-700">{selectedContext.id}</span>
+                      <Badge variant="outline" className={stateClasses[selectedContext.state]}>{stateLabels[selectedContext.state]}</Badge>
                     </div>
-                    <p className="mt-3 text-sm font-medium text-emerald-950">
-                      {selectedContext.order_external_id} · {selectedContext.customer}
-                    </p>
-                    <p className="mt-1 text-xs leading-5 text-emerald-800">
-                      {selectedContext.state_reason}
-                    </p>
+                    <p className="mt-3 text-sm font-medium text-slate-950">{selectedContext.order_external_id || 'Sem pedido'} · {selectedContext.customer || 'Sem cliente'}</p>
+                    <p className="mt-1 text-xs leading-5 text-slate-700">{selectedContext.state_reason}</p>
+                    <p className="mt-2 text-xs font-medium text-slate-600">Responsável: {selectedContext.state_responsible}</p>
                   </div>
 
                   <dl className="grid gap-3 text-sm sm:grid-cols-2">
-                    <div>
-                      <dt className="text-slate-500">Data prometida</dt>
-                      <dd className="font-medium text-slate-900">{formatDate(selectedContext.promised_date)}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-slate-500">Itens</dt>
-                      <dd className="font-medium text-slate-900">{selectedContext.item_count}</dd>
-                    </div>
-                    <div className="sm:col-span-2">
-                      <dt className="text-slate-500">Local de entrega</dt>
-                      <dd className="font-medium text-slate-900">{selectedContext.delivery_location}</dd>
-                    </div>
+                    <div><dt className="text-slate-500">Status do pedido</dt><dd className="font-medium text-slate-900">{selectedContext.order_status}</dd></div>
+                    <div><dt className="text-slate-500">Status de elegibilidade</dt><dd className="font-medium text-slate-900">{selectedContext.eligibility_status}</dd></div>
+                    <div><dt className="text-slate-500">Data prometida</dt><dd className="font-medium text-slate-900">{selectedContext.promised_date ? formatDate(selectedContext.promised_date) : '—'}</dd></div>
+                    <div><dt className="text-slate-500">Itens</dt><dd className="font-medium text-slate-900">{selectedContext.item_count || '—'}</dd></div>
                   </dl>
 
                   <div>
-                    <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-900">
-                      <History className="h-4 w-4" aria-hidden="true" />
-                      Histórico append-only
-                    </div>
+                    <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-900"><History className="h-4 w-4" aria-hidden="true" />Histórico append-only</div>
                     <div className="overflow-hidden rounded-lg border border-slate-200">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Evento</TableHead>
-                            <TableHead>Quando</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {selectedContext.events.map((event) => (
-                            <TableRow key={event.id}>
-                              <TableCell>
-                                <div className="font-medium text-slate-900">{event.type}</div>
-                                <div className="mt-1 text-xs text-slate-500">{event.reason}</div>
-                              </TableCell>
-                              <TableCell className="whitespace-nowrap text-xs text-slate-600">
-                                {formatDateTime(event.occurred_at)}
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
+                      <Table><TableHeader><TableRow><TableHead>Evento</TableHead><TableHead>Quando</TableHead></TableRow></TableHeader><TableBody>
+                        {selectedContext.events.map((event) => <TableRow key={event.id}><TableCell><div className="font-medium text-slate-900">{event.type}</div><div className="mt-1 text-xs text-slate-500">{event.reason}</div></TableCell><TableCell className="whitespace-nowrap text-xs text-slate-600">{formatDateTime(event.occurred_at)}</TableCell></TableRow>)}
+                      </TableBody></Table>
                     </div>
                   </div>
                 </div>
-              ) : (
-                <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-sm text-slate-600">
-                  Registre a primeira fixture válida para visualizar o contexto e o histórico.
-                </div>
-              )}
+              ) : <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-sm text-slate-600">Escolha um cenário e registre a demanda para visualizar seu estado e histórico.</div>}
             </CardContent>
           </Card>
         </div>
 
         <Card className="border-slate-200 bg-white shadow-sm">
-          <CardHeader>
-            <CardTitle>Demandas registradas</CardTitle>
-            <CardDescription>
-              {contexts.length === 0
-                ? 'Nenhuma demanda foi registrada neste navegador.'
-                : `${contexts.length} contexto${contexts.length === 1 ? '' : 's'} registrado${contexts.length === 1 ? '' : 's'} na fixture.`}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {contexts.length > 0 ? (
-              <div className="overflow-hidden rounded-lg border border-slate-200">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Pedido</TableHead>
-                      <TableHead>Cliente</TableHead>
-                      <TableHead>Data prometida</TableHead>
-                      <TableHead>Estado</TableHead>
-                      <TableHead>Atualizado</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {contexts.map((context) => (
-                      <TableRow
-                        key={context.id}
-                        className="cursor-pointer"
-                        onClick={() => setSelectedContextId(context.id)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') {
-                            event.preventDefault()
-                            setSelectedContextId(context.id)
-                          }
-                        }}
-                        role="button"
-                        tabIndex={0}
-                        aria-label={`Selecionar contexto ${context.id}`}
-                      >
-                        <TableCell className="font-medium text-slate-900">
-                          {context.order_external_id}
-                        </TableCell>
-                        <TableCell>{context.customer}</TableCell>
-                        <TableCell>{formatDate(context.promised_date)}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="border-emerald-300 text-emerald-700">
-                            {context.state}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-xs text-slate-600">
-                          {formatDateTime(context.updated_at)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            ) : null}
-          </CardContent>
+          <CardHeader><CardTitle>Demandas registradas</CardTitle><CardDescription>{contexts.length === 0 ? 'Nenhuma demanda foi registrada neste navegador.' : `${contexts.length} contexto${contexts.length === 1 ? '' : 's'} registrado${contexts.length === 1 ? '' : 's'} na fixture.`}</CardDescription></CardHeader>
+          <CardContent>{contexts.length > 0 ? <div className="overflow-hidden rounded-lg border border-slate-200"><Table><TableHeader><TableRow><TableHead>Pedido</TableHead><TableHead>Estado</TableHead><TableHead>Status pedido</TableHead><TableHead>Elegibilidade</TableHead><TableHead>Responsável</TableHead></TableRow></TableHeader><TableBody>{contexts.map((context) => <TableRow key={context.id} className="cursor-pointer" onClick={() => setSelectedContextId(context.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedContextId(context.id) } }} role="button" tabIndex={0} aria-label={`Selecionar contexto ${context.id}`}><TableCell className="font-medium text-slate-900">{context.order_external_id || '—'}</TableCell><TableCell><Badge variant="outline" className={stateClasses[context.state]}>{context.state}</Badge></TableCell><TableCell>{context.order_status}</TableCell><TableCell>{context.eligibility_status}</TableCell><TableCell className="text-xs text-slate-600">{context.state_responsible}</TableCell></TableRow>)}</TableBody></Table></div> : null}</CardContent>
         </Card>
       </div>
     </div>
